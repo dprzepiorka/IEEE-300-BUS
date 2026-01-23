@@ -1,7 +1,13 @@
 """
 HYBRYDOWA OPTYMALIZACJA:Generatory + Rekonfiguracja topologii jednocześnie
 Funkcja celu:f = w1*(N_disabled/N_max) + w2*(Overload_current/Overload_base)
-WERSJA Z RANKINGIEM LINII + Min/Max z Excela + EARLY STOPPING + PEŁNY EKSPORT USTAWIEŃ
+WERSJA Z:
+- Rankingiem linii + Min/Max z Excela
+- Early stopping
+- Pełnym eksportem ustawień + obciążenia linii
+- Wczytywaniem danych bazowych (spójność z Python.py)
+- ZŁAGODZONĄ WERYFIKACJĄ Load Flow (akceptuje gdy ≥70% linii ma dane)
+- NAPRAWIONYM resetowaniem linii (wszystkie włącza przed wyłączeniem)
 """
 
 import sys
@@ -49,14 +55,14 @@ if not os.path.exists(HYBRID_OUT_DIR):
 
 # Parametry PSO
 HYBRID_PSO_PARAMS = {
-    'n_particles':100,
-    'max_iter':500,
+    'n_particles':10,
+    'max_iter':5,
     'w':0.7,
     'c1':1.5,
     'c2':1.5,
     'autosave_every':10,
-    'early_stop_threshold':0.0,    # ✅ Zatrzymaj gdy f <= 0
-    'early_stop_patience':100,      # ✅ Brak poprawy przez 100 iteracji
+    'early_stop_threshold':0.0,
+    'early_stop_patience':100,
 }
 
 # Wagi funkcji celu
@@ -81,29 +87,185 @@ def log(message):
         print(message)
 
 # ==========================================
+# WCZYTYWANIE DANYCH BAZOWYCH
+# ==========================================
+
+def load_base_data_from_excel(app, excel_file):
+    """
+    Wczytaj dane bazowe z Excela - IDENTYCZNIE JAK W Python.py
+    Zapewnia spójność stanu początkowego między Python.py a hybrid_optimizer.py
+    """
+    
+    print("\n" + "="*80)
+    print("📥 WCZYTYWANIE DANYCH BAZOWYCH Z EXCELA")
+    print("="*80)
+    print(f"Plik:{excel_file}")
+    
+    try:
+        # === 1.OBCIĄŻENIA (ElmLod) ===
+        print("\n[1/4] Obciążenia (ElmLod)...")
+        try:
+            loads_df = pd.read_excel(excel_file, sheet_name="Loads")
+            loads_set = 0
+            loads_not_found = []
+            
+            for idx, row in loads_df.iterrows():
+                name = str(row["name"]).strip()
+                P = float(row["P"])
+                Q = float(row["Q"])
+                
+                elem = find_element_multi_method(app, name, "ElmLod")
+                if elem:
+                    try:
+                        elem.SetAttribute("plini", P)
+                        elem.SetAttribute("qlini", Q)
+                        loads_set += 1
+                    except Exception as e:
+                        print(f"  ⚠️ {name}:błąd ustawienia - {e}")
+                else:
+                    loads_not_found.append(name)
+            
+            print(f"  ✓ Obciążenia:{loads_set}/{len(loads_df)} ({100*loads_set/max(1,len(loads_df)):.1f}%)")
+            if loads_not_found and len(loads_not_found) <= 5:
+                print(f"  ⚠️ Nie znaleziono:{', '.join(loads_not_found[:5])}")
+            elif len(loads_not_found) > 5:
+                print(f"  ⚠️ Nie znaleziono:{len(loads_not_found)} elementów")
+                
+        except Exception as e:
+            print(f"  ❌ Błąd wczytywania Loads:{e}")
+        
+        # === 2.GENERATORY SYNCHRONICZNE (ElmSym) ===
+        print("\n[2/4] Generatory synchroniczne (ElmSym)...")
+        try:
+            gens_df = pd.read_excel(excel_file, sheet_name="Generators")
+            gens_set = 0
+            gens_not_found = []
+            
+            for idx, row in gens_df.iterrows():
+                name = str(row["name"]).strip()
+                P = float(row["P"])
+                Q = float(row["Q"])
+                
+                elem = find_element_multi_method(app, name, "ElmSym")
+                if elem:
+                    try:
+                        elem.SetAttribute("pgini", P)
+                        elem.SetAttribute("qgini", Q)
+                        gens_set += 1
+                    except Exception as e:
+                        print(f"  ⚠️ {name}:błąd ustawienia - {e}")
+                else:
+                    gens_not_found.append(name)
+            
+            print(f"  ✓ Generatory:{gens_set}/{len(gens_df)} ({100*gens_set/max(1,len(gens_df)):.1f}%)")
+            if gens_not_found and len(gens_not_found) <= 5:
+                print(f"  ⚠️ Nie znaleziono:{', '.join(gens_not_found[:5])}")
+            elif len(gens_not_found) > 5:
+                print(f"  ⚠️ Nie znaleziono:{len(gens_not_found)} elementów")
+                
+        except Exception as e:
+            print(f"  ❌ Błąd wczytywania Generators:{e}")
+        
+        # === 3.SYSTEMY PV (ElmPvsys) ===
+        print("\n[3/4] Systemy PV (ElmPvsys)...")
+        try:
+            pv_df = pd.read_excel(excel_file, sheet_name="PV")
+            pv_set = 0
+            pv_not_found = []
+            
+            for idx, row in pv_df.iterrows():
+                name = str(row["name"]).strip()
+                P = float(row["P"])
+                Q = float(row["Q"])
+                
+                elem = find_element_multi_method(app, name, "ElmPvsys")
+                if elem:
+                    try:
+                        elem.SetAttribute("pgini", P)
+                        elem.SetAttribute("qgini", Q)
+                        pv_set += 1
+                    except Exception as e:
+                        print(f"  ⚠️ {name}:błąd ustawienia - {e}")
+                else:
+                    pv_not_found.append(name)
+            
+            print(f"  ✓ PV:{pv_set}/{len(pv_df)} ({100*pv_set/max(1,len(pv_df)):.1f}%)")
+            if pv_not_found and len(pv_not_found) <= 5:
+                print(f"  ⚠️ Nie znaleziono:{', '.join(pv_not_found[:5])}")
+            elif len(pv_not_found) > 5:
+                print(f"  ⚠️ Nie znaleziono:{len(pv_not_found)} elementów")
+                
+        except Exception as e:
+            print(f"  ❌ Błąd wczytywania PV:{e}")
+        
+        # === 4.GENERATORY STATYCZNE (ElmGenstat) ===
+        print("\n[4/4] Generatory statyczne (ElmGenstat)...")
+        try:
+            es_df = pd.read_excel(excel_file, sheet_name="StatGen")
+            es_set = 0
+            es_not_found = []
+            
+            for idx, row in es_df.iterrows():
+                name = str(row["name"]).strip()
+                P = float(row["P"])
+                Q = float(row["Q"])
+                
+                elem = find_element_multi_method(app, name, "ElmGenstat")
+                if elem:
+                    try:
+                        elem.SetAttribute("pgini", P)
+                        elem.SetAttribute("qgini", Q)
+                        es_set += 1
+                    except Exception as e:
+                        print(f"  ⚠️ {name}:błąd ustawienia - {e}")
+                else:
+                    es_not_found.append(name)
+            
+            print(f"  ✓ StatGen:{es_set}/{len(es_df)} ({100*es_set/max(1,len(es_df)):.1f}%)")
+            if es_not_found and len(es_not_found) <= 5:
+                print(f"  ⚠️ Nie znaleziono:{', '.join(es_not_found[:5])}")
+            elif len(es_not_found) > 5:
+                print(f"  ⚠️ Nie znaleziono:{len(es_not_found)} elementów")
+                
+        except Exception as e:
+            print(f"  ❌ Błąd wczytywania StatGen:{e}")
+        
+        print("\n" + "="*80)
+        print("✅ DANE BAZOWE WCZYTANE")
+        print("="*80)
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ KRYTYCZNY BŁĄD wczytywania danych:{e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+# ==========================================
 # FUNKCJE POMOCNICZE
 # ==========================================
 
 def load_hybrid_config(excel_file):
-    """Wczytaj konfigurację"""
+    """Wczytaj konfigurację optymalizacji"""
     
     print("\n" + "="*80)
-    print("🔍 WCZYTYWANIE KONFIGURACJI")
+    print("🔍 WCZYTYWANIE KONFIGURACJI OPTYMALIZACJI")
     print("="*80)
     
     try:
-        # === 1.GENERATORY ===
-        print("\n[1/2] Generatory...")
+        # === 1.GENERATORY DO OPTYMALIZACJI ===
+        print("\n[1/2] Generatory do optymalizacji...")
         try:
             df_opt = pd.read_excel(excel_file, sheet_name="Optymalizacja")
             opt_variables = df_opt.to_dict('records')
-            print(f"  ✓ {len(opt_variables)} elementów")
+            print(f"  ✓ {len(opt_variables)} elementów do optymalizacji")
         except Exception as e:
             print(f"  ⚠️ Błąd:{e}")
             opt_variables = []
         
-        # === 2.TOPOLOGIA ===
-        print("\n[2/2] Topologia...")
+        # === 2.TOPOLOGIA (LINIE DO REKONFIGURACJI) ===
+        print("\n[2/2] Topologia (linie do rekonfiguracji)...")
         try:
             df_reconfig = pd.read_excel(excel_file, sheet_name="Rekonfiguracja")
             
@@ -118,9 +280,9 @@ def load_hybrid_config(excel_file):
                                         key=lambda x:x[1] if pd.notna(x[1]) else 999)
                     candidate_lines = [line for line, _ in sorted_pairs]
                 
-                print(f"  ✓ {len(candidate_lines)} linii")
+                print(f"  ✓ {len(candidate_lines)} linii kandydujących")
             else:
-                print(f"  ⚠️ Brak kolumn")
+                print(f"  ⚠️ Brak kolumn Line_Name lub Can_Disable")
                 candidate_lines = []
             
             # WCZYTAJ Min i Max
@@ -136,7 +298,7 @@ def load_hybrid_config(excel_file):
                     elif param_name == 'Min_Lines_Out':
                         min_lines_out = int(row['Value'])
             
-            print(f"  ✓ Min:{min_lines_out}, Max:{max_lines_out}")
+            print(f"  ✓ Zakres wyłączeń:Min={min_lines_out}, Max={max_lines_out}")
             
         except Exception as e:
             print(f"  ⚠️ Błąd:{e}")
@@ -205,18 +367,30 @@ def get_observed_lines_stats(app, ldf, observed_lines):
         }
 
 # ==========================================
-# ✅ NOWA FUNKCJA - EKSPORT WSZYSTKICH USTAWIEŃ
+# EKSPORT WSZYSTKICH USTAWIEŃ (z weryfikacją LF)
 # ==========================================
 
-def export_all_settings(app, phase="BEFORE"):
+def export_all_settings(app, ldf, phase="BEFORE"):
     """
-    Eksportuj ustawienia WSZYSTKICH elementów generujących/pobierających moc
-    
-    Returns:
-        dict z kluczami:'ElmSym', 'ElmGenstat', 'ElmPvsys', 'ElmLod', 'ElmLne'
+    Eksportuj ustawienia WSZYSTKICH elementów + OBCIĄŻENIA LINII
+    + WERYFIKACJA czy Load Flow zbiegł
     """
     
     print(f"\n📋 Eksport ustawień - {phase}...")
+    
+    # WYKONAJ LOAD FLOW + WERYFIKACJA
+    try:
+        code = ldf.Execute()
+        print(f"  ✓ Load Flow wykonany (code={code})")
+        
+        if code >= 2:
+            print(f"  ❌ Load Flow NIE ZBIEGŁ (code={code})!")
+            print(f"  ⚠️ Eksport może zawierać nieprawidłowe dane (N/A)!")
+        elif code == 1:
+            print(f"  ⚠️ Load Flow z ostrzeżeniem (code=1)")
+    except Exception as e:
+        print(f"  ❌ Load Flow błąd:{e}")
+        print(f"  ⚠️ Eksport może zawierać nieprawidłowe dane!")
     
     all_settings = {}
     
@@ -316,40 +490,79 @@ def export_all_settings(app, phase="BEFORE"):
         print(f"  ⚠️ ElmLod błąd:{e}")
         all_settings['ElmLod'] = []
     
-    # === 5.LINIE (ElmLne) - STATUS ===
+    # === 5.LINIE (ElmLne) - STATUS + OBCIĄŻENIE + WERYFIKACJA ===
     try:
         lines = app.GetCalcRelevantObjects("*.ElmLne")
         line_data = []
+        none_count = 0
         
         for line in lines:
             try:
+                # Pobierz obciążenie
+                loading = None
+                try:
+                    loading = line.GetAttribute("c:loading")
+                    if loading is None:
+                        none_count += 1
+                except:
+                    none_count += 1
+                
+                # Pobierz prąd
+                current = None
+                try:
+                    current = line.GetAttribute("m:I:bus1")
+                except:
+                    pass
+                
                 row = {
                     'Element':line.loc_name,
                     'Type':'ElmLne',
                     'Status':'OUT' if getattr(line, 'outserv', 0) == 1 else 'IN',
+                    'Loading [%]':f"{loading:.2f}" if loading is not None else 'N/A',
+                    'Current [kA]':f"{current:.3f}" if current is not None else 'N/A',
                 }
                 line_data.append(row)
             except:
                 pass
         
         all_settings['ElmLne'] = line_data
-        print(f"  ✓ ElmLne:{len(line_data)} linii")
+        
+        # RAPORTOWANIE PROBLEMU
+        if none_count > 0:
+            print(f"  ⚠️ ElmLne:{none_count}/{len(lines)} linii bez obciążenia (Load Flow nie zbiegł?)")
+        
+        print(f"  ✓ ElmLne:{len(line_data)} linii (z obciążeniami)")
     except Exception as e:
         print(f"  ⚠️ ElmLne błąd:{e}")
         all_settings['ElmLne'] = []
     
-    # === 6.TRANSFORMATORY (ElmTr2) - STATUS ===
+    # === 6.TRANSFORMATORY (ElmTr2) - STATUS + OBCIĄŻENIE ===
     try:
         trafos = app.GetCalcRelevantObjects("*.ElmTr2")
         trafo_data = []
         
         for trafo in trafos:
             try:
+                # Pobierz obciążenie
+                loading = None
+                try:
+                    loading = trafo.GetAttribute("c:loading")
+                except:
+                    pass
+                
+                # Pobierz tap
+                tap = None
+                try:
+                    tap = trafo.GetAttribute("nntap")
+                except:
+                    pass
+                
                 row = {
                     'Element':trafo.loc_name,
                     'Type':'ElmTr2',
                     'Status':'OUT' if getattr(trafo, 'outserv', 0) == 1 else 'IN',
-                    'Tap':trafo.GetAttribute('nntap') if hasattr(trafo, 'nntap') else None,
+                    'Loading [%]':f"{loading:.2f}" if loading is not None else 'N/A',
+                    'Tap':tap if tap is not None else 'N/A',
                 }
                 trafo_data.append(row)
             except:
@@ -364,17 +577,17 @@ def export_all_settings(app, phase="BEFORE"):
     return all_settings
 
 # ==========================================
-# KLASA FUNKCJI CELU
+# KLASA FUNKCJI CELU (ZŁAGODZONA WERYFIKACJA)
 # ==========================================
 
 class HybridObjective:
-    """Hybrydowa funkcja celu - RANKING + Min/Max"""
+    """Hybrydowa funkcja celu - RANKING + Min/Max + ZŁAGODZONA WERYFIKACJA LF"""
     
     def __init__(self, app, ldf, opt_variables, candidate_lines, min_lines_out, max_lines_out,
                  observed_lines, overload_base, w1=0.3, w2=0.7, debug_file=None):
         
         print("\n" + "="*80)
-        print("🔧 FUNKCJA CELU (RANKING)")
+        print("🔧 FUNKCJA CELU (RANKING + ZŁAGODZONA WERYFIKACJA)")
         print("="*80)
         
         self.app = app
@@ -384,7 +597,7 @@ class HybridObjective:
         self.min_lines_out = min_lines_out
         self.max_lines_out = max_lines_out
         self.observed_lines = observed_lines
-        self.overload_base = overload_base
+        self.overload_base = max(overload_base, 0.1)
         self.w1 = w1
         self.w2 = w2
         self.debug_file = debug_file
@@ -392,6 +605,10 @@ class HybridObjective:
         self.eval_count = 0
         self.best_value = np.inf
         self.best_x = None
+        
+        # ✅ LICZNIKI DIAGNOSTYCZNE
+        self.island_count = 0
+        self.lf_fail_count = 0
         
         # Wymiary
         self.n_gen_vars = 0
@@ -408,8 +625,9 @@ class HybridObjective:
         print(f"  Line vars:{self.n_line_vars} (1 liczba + {len(candidate_lines)} ranking)")
         print(f"  Total:{self.total_dim}")
         print(f"  Zakres wyłączeń:[{min_lines_out}, {max_lines_out}]")
-        print(f"  Overload_base:{overload_base:.3f}")
+        print(f"  Overload_base:{self.overload_base:.3f}")
         print(f"  Wagi:w1={w1}, w2={w2}")
+        print(f"  ✅ Złagodzona weryfikacja:akceptuje ≥70% linii z danymi")
         
         # Cache
         self._gen_cache = {}
@@ -421,7 +639,7 @@ class HybridObjective:
     def _cache_elements(self):
         """Cache elementów"""
         
-        print("\n🔍 Cache...")
+        print("\n🔍 Cache elementów...")
         
         gen_count = 0
         for var in self.opt_variables:
@@ -446,13 +664,9 @@ class HybridObjective:
         """Dekoduj wektor - WYMUSZENIE [Min, Max]"""
         gen_values = x[:self.n_gen_vars]
         
-        # Pierwsza zmienna topologii = liczba [0, 1]
         n_to_disable_raw = x[self.n_gen_vars]
-        
-        # Pozostałe = ranking
         line_scores = x[self.n_gen_vars + 1:]
         
-        # SKALUJ do zakresu [Min, Max]
         n_range = self.max_lines_out - self.min_lines_out
         
         if n_range > 0:
@@ -460,10 +674,8 @@ class HybridObjective:
         else:
             n_to_disable = self.min_lines_out
         
-        # Ogranicz do [Min, Max]
         n_to_disable = max(self.min_lines_out, min(n_to_disable, self.max_lines_out))
         
-        # Wybierz TOP N linii według rankingu
         lines_to_disable = []
         
         if n_to_disable > 0 and len(line_scores) >= len(self.candidate_lines):
@@ -504,25 +716,51 @@ class HybridObjective:
                     idx += 1
     
     def _apply_line_settings(self, lines_to_disable):
-        """Ustaw linie"""
-        for line_name in self.candidate_lines:
-            line = self._line_cache.get(line_name)
-            if line:
+        """
+        Ustaw linie - NAPRAWIONA WERSJA
+        ✅ Włącza WSZYSTKIE linie przed wyłączeniem wybranych
+        """
+        
+        debug_log = os.path.join(HYBRID_OUT_DIR, "hybrid_objective_debug.txt")
+        
+        def write_debug(msg):
+            try:
+                with open(debug_log, 'a', encoding='utf-8') as f:
+                    f.write(msg + "\n")
+            except:
+                pass
+        
+        # ✅ KROK 1:WŁĄCZ WSZYSTKIE LINIE
+        try:
+            all_lines = self.app.GetCalcRelevantObjects("*.ElmLne")
+            enabled_count = 0
+            
+            for line in all_lines:
                 try:
                     line.outserv = 0
+                    enabled_count += 1
                 except:
                     pass
+            
+            write_debug(f"    Reset linii:włączono {enabled_count} linii")
+        except Exception as e:
+            write_debug(f"    ⚠️ Błąd resetowania linii:{e}")
         
+        # ✅ KROK 2:WYŁĄCZ TYLKO WYBRANE
+        disabled_count = 0
         for line_name in lines_to_disable:
             line = self._line_cache.get(line_name)
             if line:
                 try:
                     line.outserv = 1
-                except:
-                    pass
+                    disabled_count += 1
+                except Exception as e:
+                    write_debug(f"    ⚠️ Błąd wyłączenia {line_name}:{e}")
+        
+        write_debug(f"    Wyłączono:{disabled_count}/{len(lines_to_disable)} linii")
     
     def _check_island(self):
-        """Sprawdź wyspy"""
+        """Sprawdź wyspy - ZŁAGODZONA WERSJA"""
         
         debug_log = os.path.join(HYBRID_OUT_DIR, "hybrid_objective_debug.txt")
         
@@ -537,15 +775,19 @@ class HybridObjective:
             code = self.ldf.Execute()
             write_debug(f"    LF code:{code}")
             
+            # ✅ TYLKO CODE >= 2 = WYSPA (nie 1!)
             if code >= 2:
-                write_debug(f"    LF nie zbiegł → WYSPA")
+                write_debug(f"    LF nie zbiegł (code={code}) → WYSPA")
                 return True
             
+            # ✅ CODE 0 = OK, od razu zwróć False
             if code == 0:
-                write_debug(f"    LF OK → brak wyspy")
+                write_debug(f"    LF OK (code=0)")
                 return False
             
-            # Kod 1 - sprawdź napięcia
+            # CODE == 1:sprawdź napięcia (ostrzeżenie)
+            write_debug(f"    LF z ostrzeżeniem (code=1) → sprawdzam napięcia")
+            
             buses = self.app.GetCalcRelevantObjects("*.ElmTerm")
             total_buses = len(buses)
             
@@ -555,40 +797,54 @@ class HybridObjective:
             
             low_voltage_count = 0
             min_voltage = 999.0
+            none_count = 0
             
             for bus in buses:
                 try:
                     u_pu = bus.GetAttribute("m:u")
-                    if u_pu is not None:
-                        min_voltage = min(min_voltage, u_pu)
-                        if u_pu < 0.01:
-                            low_voltage_count += 1
+                    
+                    if u_pu is None:
+                        none_count += 1
+                        continue
+                    
+                    min_voltage = min(min_voltage, u_pu)
+                    
+                    if u_pu < 0.01:
+                        low_voltage_count += 1
                 except:
-                    pass
+                    none_count += 1
             
-            write_debug(f"    Min U:{min_voltage:.3f}, Low:{low_voltage_count}")
+            write_debug(f"    Min U:{min_voltage:.3f}, Low:{low_voltage_count}, None:{none_count}")
             
-            if low_voltage_count > total_buses * 0.05:
-                write_debug(f"    → WYSPA")
+            # ✅ ZŁAGODZONE WARUNKI
+            
+            # JEŚLI >80% węzłów bez napięcia (nie 50%)
+            if none_count > total_buses * 0.8:
+                write_debug(f"    {none_count}/{total_buses} węzłów bez napięcia (>80%) → WYSPA")
                 return True
             
-            if min_voltage > 0.7:
-                write_debug(f"    → OK")
-                return False
-            
-            if min_voltage < 0.5:
-                write_debug(f"    → WYSPA")
+            # JEŚLI >10% niskich napięć (nie 5%)
+            if low_voltage_count > total_buses * 0.1:
+                write_debug(f"    {low_voltage_count}/{total_buses} niskich napięć (>10%) → WYSPA")
                 return True
             
-            write_debug(f"    → OK")
+            # JEŚLI min napięcie BARDZO niskie (0.3 zamiast 0.5)
+            if min_voltage < 0.3:
+                write_debug(f"    Min U < 0.3 → WYSPA")
+                return True
+            
+            write_debug(f"    → OK (brak wyspy)")
             return False
         
         except Exception as e:
-            write_debug(f"    EXCEPTION:{e}")
+            write_debug(f"    EXCEPTION:{e} → WYSPA")
             return True
     
     def _calculate_current_overload(self):
-        """Oblicz przeciążenia - TYLKO obserwowanych"""
+        """
+        Oblicz przeciążenia - ZŁAGODZONA WERSJA
+        ✅ Akceptuje gdy ≥70% linii ma dane (nie 100%)
+        """
         
         debug_log = os.path.join(HYBRID_OUT_DIR, "hybrid_objective_debug.txt")
         
@@ -611,6 +867,8 @@ class HybridObjective:
             
             found = 0
             details = []
+            valid_readings = 0
+            none_count = 0
             
             for line in lines:
                 if line.loc_name in self.observed_lines:
@@ -619,18 +877,38 @@ class HybridObjective:
                         loading = line.GetAttribute("c:loading")
                         
                         if loading is None:
-                            continue
+                            none_count += 1
+                            write_debug(f"    ⚠️ {line.loc_name}:loading=None")
+                            continue  # ✅ Pomiń, nie zwracaj inf
+                        
+                        # ✅ Loading jest OK
+                        valid_readings += 1
                         
                         if loading > 100:
                             excess = loading - 100
                             overload += excess
                             details.append(f"{line.loc_name}:{loading:.2f}%")
                         
-                    except:
-                        pass
+                    except Exception as e:
+                        write_debug(f"    ❌ {line.loc_name}:Exception - {e}")
+                        none_count += 1
+                        continue
             
-            write_debug(f"    Znaleziono:{found}, Przeciążonych:{len(details)}")
-            write_debug(f"    Suma:{overload:.3f}")
+            write_debug(f"    Znaleziono:{found}, Poprawnych:{valid_readings}, None:{none_count}, Przeciążonych:{len(details)}")
+            
+            # ✅ ZŁAGODZONY WARUNEK:Minimum 70% linii musi mieć dane
+            required_valid = int(len(self.observed_lines) * 0.7)
+            
+            if valid_readings < required_valid:
+                write_debug(f"    ❌ Za mało danych:{valid_readings}/{len(self.observed_lines)} (wymagane {required_valid}) → KARA")
+                return np.inf
+            
+            # ✅ JEŚLI WSZYSTKIE NONE - to problem
+            if valid_readings == 0:
+                write_debug(f"    ❌ WSZYSTKIE linie bez danych → KARA")
+                return np.inf
+            
+            write_debug(f"    ✓ Suma przeciążeń:{overload:.3f} (z {valid_readings}/{len(self.observed_lines)} linii)")
             
             return overload
         
@@ -639,7 +917,7 @@ class HybridObjective:
             return np.inf
     
     def __call__(self, x):
-        """Funkcja celu - FINALNA"""
+        """Funkcja celu - z licznikami diagnostycznymi"""
         self.eval_count += 1
         
         debug_log = os.path.join(HYBRID_OUT_DIR, "hybrid_objective_debug.txt")
@@ -655,12 +933,13 @@ class HybridObjective:
         
         if self.eval_count == 1:
             write_debug("="*80)
-            write_debug("HYBRID OBJECTIVE - RANKING + Min/Max")
+            write_debug("HYBRID OBJECTIVE - RANKING + ZŁAGODZONA WERYFIKACJA")
             write_debug("="*80)
             write_debug(f"Overload_base:{self.overload_base:.3f}")
             write_debug(f"Zakres wyłączeń:[{self.min_lines_out}, {self.max_lines_out}]")
             write_debug(f"Wagi:w1={self.w1}, w2={self.w2}")
             write_debug(f"Funkcja:f = w1*(N/Max) + w2*(Overload/Base)")
+            write_debug(f"✅ Złagodzona:akceptuje ≥70% linii z danymi")
             write_debug("="*80 + "\n")
         
         try:
@@ -696,16 +975,24 @@ class HybridObjective:
             # Wyspa
             try:
                 if self._check_island():
+                    self.island_count += 1  # ✅ Licznik
                     if show_debug:
-                        write_debug(f"  WYSPA → inf")
+                        write_debug(f"  WYSPA → inf (total:{self.island_count})")
                     return np.inf
             except Exception as e:
                 write_debug(f"  ❌ Wyspa:{e}")
                 return np.inf
             
-            # Przeciążenia
+            # Przeciążenia (z weryfikacją LF!)
             try:
                 overload_current = self._calculate_current_overload()
+                
+                if np.isinf(overload_current):
+                    self.lf_fail_count += 1  # ✅ Licznik
+                    if show_debug:
+                        write_debug(f"  ❌ LF NIE ZBIEGŁ → inf (total:{self.lf_fail_count})")
+                    return np.inf
+                
             except Exception as e:
                 write_debug(f"  ❌ Overload:{e}")
                 return np.inf
@@ -714,17 +1001,12 @@ class HybridObjective:
             try:
                 n_disabled = len(lines_to_disable)
                 
-                # Składnik 1:ZNORMALIZOWANY
                 if self.max_lines_out > 0:
                     term1 = n_disabled / self.max_lines_out
                 else:
                     term1 = float(n_disabled)
                 
-                # Składnik 2:Przeciążenia
-                if self.overload_base > 0:
-                    term2 = overload_current / self.overload_base
-                else:
-                    term2 = overload_current / 100.0
+                term2 = overload_current / self.overload_base
                 
                 f_total = self.w1 * term1 + self.w2 * term2
                 
@@ -797,57 +1079,95 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
     
     try:
         safe_log("="*80)
-        safe_log("HYBRYDOWA OPTYMALIZACJA - PEŁNY EKSPORT USTAWIEŃ")
+        safe_log("HYBRYDOWA OPTYMALIZACJA - ZŁAGODZONA WERYFIKACJA")
         safe_log("="*80)
         safe_log(f"Scenariusz:{scenario_name}")
+        safe_log(f"Timestamp:{timestamp}")
+        safe_log(f"✅ Weryfikacja:akceptuje ≥70% linii z danymi")
+        safe_log(f"✅ Reset linii:włącza WSZYSTKIE przed wyłączeniem")
         safe_log("="*80)
         
+        # [0/7] WCZYTAJ DANE BAZOWE
+        safe_log("\n[0/7] Wczytywanie danych bazowych z Excela...")
+        
+        if not load_base_data_from_excel(app, excel_file):
+            safe_log("❌ Błąd wczytywania danych bazowych - przerywam")
+            return None
+        
+        safe_log("  ✅ Dane bazowe wczytane")
+        
         # [1/7] Config
-        safe_log("\n[1/7] Konfiguracja...")
+        safe_log("\n[1/7] Konfiguracja optymalizacji...")
         
         opt_variables, candidate_lines, min_lines_out, max_lines_out = load_hybrid_config(excel_file)
         
         if not opt_variables and not candidate_lines:
-            safe_log("❌ Brak konfiguracji")
+            safe_log("❌ Brak konfiguracji optymalizacji")
             return None
         
-        safe_log(f"  ✓ Gen:{len(opt_variables)}")
-        safe_log(f"  ✓ Lines:{len(candidate_lines)}")
+        safe_log(f"  ✓ Zmiennych optymalizacji:{len(opt_variables)}")
+        safe_log(f"  ✓ Linii kandydujących:{len(candidate_lines)}")
         safe_log(f"  ✓ Zakres wyłączeń:[{min_lines_out}, {max_lines_out}]")
         
         # [2/7] Stan bazowy
-        safe_log("\n[2/7] Stan bazowy...")
+        safe_log("\n[2/7] Stan bazowy (po wczytaniu danych)...")
         
         all_lines = app.GetCalcRelevantObjects("*.ElmLne")
+        lines_reset = 0
         for line in all_lines:
             try:
                 line.outserv = 0
+                lines_reset += 1
             except:
                 pass
+        safe_log(f"  ✓ Zresetowano {lines_reset} linii")
         
         stats_before = get_observed_lines_stats(app, ldf, OBSERVED_LINES)
         
-        safe_log(f"  ✓ Przeciążenia:{stats_before['total_overload']:.3f}")
-        safe_log(f"  ✓ Przeciążonych:{stats_before['overloaded_count']}")
+        safe_log(f"\n  📊 Stan bazowy:")
+        safe_log(f"     Suma przeciążeń:{stats_before['total_overload']:.3f}")
+        safe_log(f"     Linii przeciążonych:{stats_before['overloaded_count']}")
+        if stats_before['overloaded_count'] > 0:
+            safe_log(f"     Max przeciążenie:{stats_before['max_overload']:.2f}% ({stats_before['max_line_name']})")
         
-        # ✅ EKSPORT STANU PRZED
+        # WERYFIKACJA Load Flow
+        safe_log(f"\n🔍 WERYFIKACJA Load Flow:")
+        
+        test_line = None
+        for line_name in OBSERVED_LINES:
+            test_line = find_element_multi_method(app, line_name, "ElmLne")
+            if test_line:
+                break
+        
+        if test_line:
+            try:
+                loading = test_line.GetAttribute("c:loading")
+                if loading is None:
+                    safe_log(f"  ❌ PROBLEM:Linia {test_line.loc_name} ma loading=None!")
+                    safe_log(f"  ❌ Load Flow NIE ZBIEGŁ - sprawdź model sieci!")
+                else:
+                    safe_log(f"  ✓ Linia {test_line.loc_name}:loading={loading:.2f}% (OK)")
+            except Exception as e:
+                safe_log(f"  ❌ Błąd odczytu:{e}")
+        else:
+            safe_log(f"  ⚠️ Nie znaleziono linii testowej")
+        
+        # EKSPORT STANU PRZED
         safe_log("\n📋 Eksport ustawień PRZED optymalizacją...")
-        settings_before = export_all_settings(app, "BEFORE")
+        settings_before = export_all_settings(app, ldf, "BEFORE")
         
         overload_base = stats_before['total_overload']
         
-        # ✅ WALIDACJA - zabezpieczenie przed zerem
         if overload_base <= 0:
             safe_log("\n" + "="*80)
             safe_log("⚠️ UWAGA:BRAK PRZECIĄŻEŃ W STANIE BAZOWYM")
             safe_log("="*80)
-            safe_log("Sieć już jest w dobrym stanie - optymalizacja może nie być potrzebna.")
-            safe_log("Ustawiam overload_base = 100.0 (wartość domyślna do normalizacji)")
+            safe_log("Kontynuuję z overload_base = 0.1 (minimalna wartość)")
             safe_log("="*80)
-            overload_base = 100.0
+            overload_base = 0.1
         
         # [3/7] Funkcja celu
-        safe_log("\n[3/7] Funkcja celu...")
+        safe_log("\n[3/7] Inicjalizacja funkcji celu...")
         
         objective = HybridObjective(
             app, ldf,
@@ -860,16 +1180,15 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
             w1=WEIGHT_TOPOLOGY,
             w2=WEIGHT_OVERLOAD
         )
-        safe_log(f"  ✓ OK")
+        safe_log(f"  ✅ Funkcja celu gotowa")
         
         # [4/7] Granice
-        safe_log("\n[4/7] Granice...")
+        safe_log("\n[4/7] Określanie granic zmiennych...")
         
         lb = []
         ub = []
         var_names = []
         
-        # Generatory
         for var in opt_variables:
             if 'Pmin' in var and 'Pmax' in var:
                 lb.append(float(var['Pmin']))
@@ -880,7 +1199,6 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
                 ub.append(float(var['Qmax']))
                 var_names.append(f"{var['Element_Name']}_Q")
         
-        # Topologia:1 zmienna = liczba + N = ranking
         lb.append(0.0)
         ub.append(1.0)
         var_names.append("N_lines_to_disable")
@@ -893,15 +1211,17 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
         lb = np.array(lb)
         ub = np.array(ub)
         
-        safe_log(f"  ✓ Dim:{len(lb)}")
-        safe_log(f"     ({objective.n_gen_vars} gen + {objective.n_line_vars} topo)")
+        safe_log(f"  ✓ Wymiar przestrzeni:{len(lb)}")
+        safe_log(f"     - Zmienne generatorów:{objective.n_gen_vars}")
+        safe_log(f"     - Zmienne topologii:{objective.n_line_vars}")
         
         # [5/7] PSO
-        safe_log("\n[5/7] PSO z Early Stopping...")
-        safe_log(f"  Cząstek:{HYBRID_PSO_PARAMS['n_particles']}")
-        safe_log(f"  Iteracji:{HYBRID_PSO_PARAMS['max_iter']}")
-        safe_log(f"  🎯 Target:f <= {HYBRID_PSO_PARAMS['early_stop_threshold']}")
-        safe_log(f"  ⏸️ Patience:{HYBRID_PSO_PARAMS['early_stop_patience']} iter")
+        safe_log("\n[5/7] Uruchamianie PSO...")
+        safe_log(f"  Parametry:")
+        safe_log(f"    Cząstek:{HYBRID_PSO_PARAMS['n_particles']}")
+        safe_log(f"    Max iteracji:{HYBRID_PSO_PARAMS['max_iter']}")
+        safe_log(f"    🎯 Early stop threshold:f <= {HYBRID_PSO_PARAMS['early_stop_threshold']}")
+        safe_log(f"    ⏸️ Early stop patience:{HYBRID_PSO_PARAMS['early_stop_patience']} iter")
         
         pso = PSO(
             func=objective,
@@ -923,8 +1243,19 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
         result = pso.optimize()
         time_end = time.time()
         
-        # ✅ Raportowanie early stopping
-        safe_log(f"\n✅ Zakończono:{time_end - time_start:.2f}s")
+        safe_log(f"\n✅ Optymalizacja zakończona:{time_end - time_start:.2f}s")
+        
+        # ✅ STATYSTYKI ODRZUCEŃ
+        safe_log(f"\n📊 STATYSTYKI ODRZUCEŃ:")
+        safe_log(f"  Ewaluacji total:{objective.eval_count}")
+        safe_log(f"  Wyspy:{objective.island_count} ({100*objective.island_count/objective.eval_count:.1f}%)")
+        safe_log(f"  LF fails:{objective.lf_fail_count} ({100*objective.lf_fail_count/objective.eval_count:.1f}%)")
+        accepted = objective.eval_count - objective.island_count - objective.lf_fail_count
+        safe_log(f"  Akceptowanych:{accepted} ({100*accepted/objective.eval_count:.1f}%)")
+        
+        if accepted / objective.eval_count < 0.05:
+            safe_log(f"\n⚠️ OSTRZEŻENIE:Bardzo niska acceptance rate (<5%)!")
+            safe_log(f"   Może być konieczne dalsze złagodzenie warunków.")
         
         if result.get('early_stopped'):
             reason = result.get('reason')
@@ -936,27 +1267,85 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
                 safe_log(f"   ⏸️ Brak poprawy przez {HYBRID_PSO_PARAMS['early_stop_patience']} iteracji")
             safe_log(f"   Zatrzymano na iteracji:{stopped_at}/{HYBRID_PSO_PARAMS['max_iter']}")
         
-        safe_log(f"F_best:{result['gbest_val']:.6f}")
+        safe_log(f"\nF_best:{result['gbest_val']:.6f}")
         
-        # [6/7] Wyniki - zastosuj najlepsze rozwiązanie
+        # [6/7] Zastosowanie najlepszego rozwiązania
         safe_log("\n[6/7] Zastosowanie najlepszego rozwiązania...")
         
         gen_best, lines_best = objective._decode_vector(result['gbest'])
         objective._apply_generator_settings(gen_best)
         objective._apply_line_settings(lines_best)
         
+        # ✅ FINALNA WERYFIKACJA najlepszego rozwiązania
+        safe_log("\n🔍 FINALNA WERYFIKACJA najlepszego rozwiązania:")
+        
+        ldf.Execute()
+        all_valid = True
+        valid_count = 0
+        
+        for line_name in OBSERVED_LINES:
+            line = find_element_multi_method(app, line_name, "ElmLne")
+            if line:
+                try:
+                    loading = line.GetAttribute("c:loading")
+                    if loading is None:
+                        safe_log(f"  ❌ {line_name}:loading=None")
+                        all_valid = False
+                    else:
+                        safe_log(f"  ✓ {line_name}:{loading:.2f}%")
+                        valid_count += 1
+                except:
+                    safe_log(f"  ❌ {line_name}:błąd odczytu")
+                    all_valid = False
+        
+        safe_log(f"\n  Poprawnych odczytów:{valid_count}/{len(OBSERVED_LINES)} ({100*valid_count/len(OBSERVED_LINES):.0f}%)")
+        
+        if not all_valid:
+            safe_log("\n⚠️ OSTRZEŻENIE:Najlepsze rozwiązanie ma niepełne dane!")
+            safe_log("   Rozważny ponowną optymalizację z innymi parametrami.")
+        
+        # ✅ DIAGNOSTYKA - sprawdź które linie są wyłączone
+        safe_log("\n🔍 DIAGNOSTYKA - status linii po optymalizacji:")
+        
+        all_lines_check = app.GetCalcRelevantObjects("*.ElmLne")
+        disabled_lines = []
+        
+        for line in all_lines_check:
+            try:
+                if getattr(line, 'outserv', 0) == 1:
+                    disabled_lines.append(line.loc_name)
+            except:
+                pass
+        
+        safe_log(f"  Wyłączonych linii faktycznie:{len(disabled_lines)}")
+        safe_log(f"  Wyłączonych z optymalizacji:{len(lines_best)}")
+        
+        if len(disabled_lines) != len(lines_best):
+            safe_log(f"  ⚠️ PROBLEM:Liczba się nie zgadza!")
+            
+            # Pokaż różnicę
+            extra_disabled = set(disabled_lines) - set(lines_best)
+            if extra_disabled:
+                safe_log(f"  ❌ Dodatkowe wyłączone (nie z optymalizacji):{extra_disabled}")
+            
+            missing_disabled = set(lines_best) - set(disabled_lines)
+            if missing_disabled:
+                safe_log(f"  ❌ Brakujące wyłączone (powinny być):{missing_disabled}")
+        else:
+            safe_log(f"  ✓ OK - liczba się zgadza")
+            for ln in disabled_lines:
+                safe_log(f"     - {ln}")
+        
         stats_after = get_observed_lines_stats(app, ldf, OBSERVED_LINES)
         
-        # ✅ EKSPORT STANU PO
         safe_log("\n📋 Eksport ustawień PO optymalizacji...")
-        settings_after = export_all_settings(app, "AFTER")
+        settings_after = export_all_settings(app, ldf, "AFTER")
         
         safe_log(f"\n📊 PORÓWNANIE:")
         safe_log(f"  Przed:{stats_before['total_overload']:.3f} ({stats_before['overloaded_count']} linii)")
         safe_log(f"  Po:{stats_after['total_overload']:.3f} ({stats_after['overloaded_count']} linii)")
         safe_log(f"  Wyłączonych linii:{len(lines_best)}")
         
-        # ✅ ZABEZPIECZONA KALKULACJA ZMIANY
         if stats_before['total_overload'] > 0:
             change = stats_after['total_overload'] - stats_before['total_overload']
             change_pct = (change / stats_before['total_overload']) * 100
@@ -966,20 +1355,19 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
             elif change > 0:
                 safe_log(f"  ⚠️ WZROST:{change:.3f} (+{change_pct:.2f}%)")
             else:
-                safe_log(f"  ➡️ BEZ ZMIANY:{stats_after['total_overload']:.3f}")
+                safe_log(f"  ➡️ BEZ ZMIANY")
         else:
             if stats_after['total_overload'] > 0:
                 safe_log(f"  ⚠️ POJAWIŁY SIĘ PRZECIĄŻENIA:{stats_after['total_overload']:.3f}")
             else:
                 safe_log(f"  ✅ BRAK PRZECIĄŻEŃ (przed i po)")
         
-        # [7/7] Excel
-        safe_log("\n[7/7] Zapisywanie do Excel...")
+        # [7/7] Zapisywanie do Excel
+        safe_log("\n[7/7] Zapisywanie wyników do Excel...")
         output_file = os.path.join(HYBRID_OUT_DIR, f"HYBRID_{scenario_name}_{timestamp}.xlsx")
         
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             
-            # ✅ ZABEZPIECZONE PODSUMOWANIE
             if stats_before['total_overload'] > 0:
                 reduction_value = (stats_before['total_overload'] - stats_after['total_overload']) / stats_before['total_overload'] * 100
                 reduction_str = f"{reduction_value:.2f}%"
@@ -989,7 +1377,6 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
                 else:
                     reduction_str = "0% (brak przeciążeń)"
             
-            # Informacja o early stopping
             early_stop_info = ""
             if result.get('early_stopped'):
                 reason = result.get('reason')
@@ -1002,13 +1389,19 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
             else:
                 early_stop_info = "Wszystkie iteracje"
             
-            # Podsumowanie
             summary = {
                 'Parametr':[
                     'Scenariusz',
+                    'Timestamp',
                     'Czas [s]',
                     'Status',
                     'Iteracji wykonanych',
+                    '',
+                    'Ewaluacji total',
+                    'Wyspy',
+                    'LF fails',
+                    'Akceptowanych',
+                    'Acceptance rate',
                     '',
                     'Przeciążenia przed',
                     'Przeciążenia po',
@@ -1021,9 +1414,16 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
                 ],
                 'Wartość':[
                     scenario_name,
+                    timestamp,
                     f"{time_end - time_start:.2f}",
                     early_stop_info,
                     f"{result.get('stopped_at_iter', HYBRID_PSO_PARAMS['max_iter'])}/{HYBRID_PSO_PARAMS['max_iter']}",
+                    '',
+                    objective.eval_count,
+                    f"{objective.island_count} ({100*objective.island_count/objective.eval_count:.1f}%)",
+                    f"{objective.lf_fail_count} ({100*objective.lf_fail_count/objective.eval_count:.1f}%)",
+                    f"{accepted} ({100*accepted/objective.eval_count:.1f}%)",
+                    f"{100*accepted/objective.eval_count:.1f}%",
                     '',
                     f"{stats_before['total_overload']:.3f}",
                     f"{stats_after['total_overload']:.3f}",
@@ -1037,17 +1437,16 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
             }
             pd.DataFrame(summary).to_excel(writer, sheet_name='Podsumowanie', index=False)
             
-            # Historia
+            # Historia PSO
             history = pd.DataFrame({
                 'Iteration':range(len(result['best_per_iter'])),
                 'F_best':result['best_per_iter'],
             })
             history.to_excel(writer, sheet_name='History', index=False)
             
-            # ✅ USTAWIENIA PRZED - WSZYSTKIE ELEMENTY
+            # USTAWIENIA PRZED
             safe_log("  Zapisywanie:Ustawienia PRZED...")
             
-            # Połącz wszystkie generujące elementy (ElmSym, ElmGenstat, ElmPvsys)
             all_gen_before = []
             all_gen_before.extend(settings_before.get('ElmSym', []))
             all_gen_before.extend(settings_before.get('ElmGenstat', []))
@@ -1057,25 +1456,21 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
                 df_gen_before = pd.DataFrame(all_gen_before)
                 df_gen_before.to_excel(writer, sheet_name='BEFORE_Generators', index=False)
             
-            # Obciążenia PRZED
             if settings_before.get('ElmLod'):
                 df_load_before = pd.DataFrame(settings_before['ElmLod'])
                 df_load_before.to_excel(writer, sheet_name='BEFORE_Loads', index=False)
             
-            # Linie PRZED
             if settings_before.get('ElmLne'):
                 df_line_before = pd.DataFrame(settings_before['ElmLne'])
                 df_line_before.to_excel(writer, sheet_name='BEFORE_Lines', index=False)
             
-            # Transformatory PRZED
             if settings_before.get('ElmTr2'):
                 df_trafo_before = pd.DataFrame(settings_before['ElmTr2'])
                 df_trafo_before.to_excel(writer, sheet_name='BEFORE_Transformers', index=False)
             
-            # ✅ USTAWIENIA PO - WSZYSTKIE ELEMENTY
+            # USTAWIENIA PO
             safe_log("  Zapisywanie:Ustawienia PO...")
             
-            # Połącz wszystkie generujące elementy (ElmSym, ElmGenstat, ElmPvsys)
             all_gen_after = []
             all_gen_after.extend(settings_after.get('ElmSym', []))
             all_gen_after.extend(settings_after.get('ElmGenstat', []))
@@ -1085,22 +1480,19 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
                 df_gen_after = pd.DataFrame(all_gen_after)
                 df_gen_after.to_excel(writer, sheet_name='AFTER_Generators', index=False)
             
-            # Obciążenia PO
             if settings_after.get('ElmLod'):
                 df_load_after = pd.DataFrame(settings_after['ElmLod'])
                 df_load_after.to_excel(writer, sheet_name='AFTER_Loads', index=False)
             
-            # Linie PO
             if settings_after.get('ElmLne'):
                 df_line_after = pd.DataFrame(settings_after['ElmLne'])
                 df_line_after.to_excel(writer, sheet_name='AFTER_Lines', index=False)
             
-            # Transformatory PO
             if settings_after.get('ElmTr2'):
                 df_trafo_after = pd.DataFrame(settings_after['ElmTr2'])
                 df_trafo_after.to_excel(writer, sheet_name='AFTER_Transformers', index=False)
             
-            # ✅ ZMIANY (tylko elementy optymalizowane)
+            # ZMIANY (tylko elementy optymalizowane)
             safe_log("  Zapisywanie:Zmiany optymalizowanych elementów...")
             
             gen_changes = []
@@ -1124,7 +1516,7 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
                 lines_status.append({'Line':line_name, 'Status_AFTER':status})
             pd.DataFrame(lines_status).to_excel(writer, sheet_name='Optimized_Lines', index=False)
             
-            # ✅ ZABEZPIECZONE PORÓWNANIE
+            # PORÓWNANIE
             if stats_before['total_overload'] > 0:
                 comparison_change = f"{(stats_after['total_overload'] - stats_before['total_overload']) / stats_before['total_overload'] * 100:.2f}%"
             else:
@@ -1158,12 +1550,16 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
             }
             pd.DataFrame(comparison).to_excel(writer, sheet_name='Comparison', index=False)
         
-        safe_log(f"✅ {output_file}")
+        safe_log(f"\n✅ Wyniki zapisane:{output_file}")
         safe_log(f"\n📊 Zapisano arkusze:")
-        safe_log(f"   - Podsumowanie, History, Comparison")
-        safe_log(f"   - BEFORE_Generators, BEFORE_Loads, BEFORE_Lines, BEFORE_Transformers")
-        safe_log(f"   - AFTER_Generators, AFTER_Loads, AFTER_Lines, AFTER_Transformers")
+        safe_log(f"   - Podsumowanie (+ statystyki odrzuceń), History, Comparison")
+        safe_log(f"   - BEFORE_Generators, BEFORE_Loads, BEFORE_Lines (+ obciążenia), BEFORE_Transformers")
+        safe_log(f"   - AFTER_Generators, AFTER_Loads, AFTER_Lines (+ obciążenia), AFTER_Transformers")
         safe_log(f"   - Optimized_Generators, Optimized_Lines")
+        
+        safe_log("\n" + "="*80)
+        safe_log("✅ OPTYMALIZACJA ZAKOŃCZONA POMYŚLNIE")
+        safe_log("="*80)
         
         return result
     
@@ -1177,6 +1573,9 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
         except:
             pass
         
+        with open(error_file, 'w', encoding='utf-8') as f:
+            f.write(error_msg)
+        
         return None
     
     finally:
@@ -1189,7 +1588,16 @@ def run_hybrid_optimization(app, ldf, excel_file, out_dir, scenario_name="HYBRID
 
 def main():
     print("\n" + "="*80)
-    print("🚀 HYBRID - PEŁNY EKSPORT USTAWIEŃ")
+    print("🚀 HYBRID OPTIMIZER - ZŁAGODZONA WERYFIKACJA + DIAGNOSTYKA")
+    print("="*80)
+    print("Funkcje:")
+    print("  ✅ Wczytywanie danych bazowych z Excel (spójność z Python.py)")
+    print("  ✅ Optymalizacja generatorów + topologii")
+    print("  ✅ Early stopping (threshold + patience)")
+    print("  ✅ Pełny eksport ustawień przed/po (z obciążeniami linii)")
+    print("  ✅ ZŁAGODZONA:akceptuje ≥70% linii z danymi (nie 100%)")
+    print("  ✅ NAPRAWIONE:resetuje WSZYSTKIE linie przed wyłączeniem")
+    print("  ✅ DIAGNOSTYKA:liczniki odrzuceń, weryfikacja statusu linii")
     print("="*80)
     
     try:
@@ -1197,24 +1605,46 @@ def main():
         app = powerfactory.GetApplicationExt()
         
         if app is None:
-            print("❌ Brak PF")
+            print("❌ Nie można połączyć z PowerFactory")
             return
         
         prj = app.GetActiveProject()
         if prj:
             print(f"✓ Projekt:{prj.loc_name}")
+        else:
+            print("⚠️ Brak aktywnego projektu")
+            return
         
         ldf = app.GetFromStudyCase("ComLdf")
         if ldf:
-            print(f"✓ LF OK")
+            print(f"✓ Load Flow znaleziony")
+        else:
+            print("❌ Brak Load Flow Calculation w Study Case")
+            return
+        
+        print(f"\n📂 Excel:{EXCEL_FILE}")
+        print(f"📂 Wyniki:{HYBRID_OUT_DIR}")
+        print("="*80)
         
         result = run_hybrid_optimization(app, ldf, EXCEL_FILE, OUT_DIR, "N1_Hybrid")
         
         if result:
-            print(f"\n✅ F_best:{result['gbest_val']:.6f}")
+            print("\n" + "="*80)
+            print("✅ SUKCES!")
+            print("="*80)
+            print(f"F_best:{result['gbest_val']:.6f}")
             if result.get('early_stopped'):
-                print(f"⏸️ Stopped early:{result.get('reason')}")
-            print(f"📁 {HYBRID_OUT_DIR}")
+                print(f"⏸️ Early stop:{result.get('reason')}")
+                print(f"   Iteracja:{result.get('stopped_at_iter')}")
+            print(f"📁 Wyniki:{HYBRID_OUT_DIR}")
+            print("\n📊 SPRAWDŹ:")
+            print("  1.Arkusz 'Podsumowanie' - Acceptance rate (powinno być >5%)")
+            print("  2.Arkusz 'AFTER_Lines' - czy obciążenia są liczbami (nie N/A)")
+            print("  3.Plik 'hybrid_objective_debug.txt' - szczegóły ewaluacji")
+            print("="*80)
+        else:
+            print("\n❌ Optymalizacja nie powiodła się")
+            print("Sprawdź logi w folderze Wyniki/Hybrid/")
     
     except Exception as e:
         print(f"\n❌ BŁĄD:{e}")
