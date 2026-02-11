@@ -19,10 +19,10 @@ class Config:
     RESULTS_DIR = r"N:\ksiz\STUDIA_DOKTORANCKIE\PRZEPIORKA\Modele sieci\Wysokie napiecie\PYTHON\Wyniki"
     
     # Plik wynikowy (najnowszy lub konkretny)
-    INPUT_FILE = r"N:\ksiz\STUDIA_DOKTORANCKIE\PRZEPIORKA\Modele sieci\Wysokie napiecie\PYTHON\Podsumowanie\Wył 72.112\Korelacja\MonteCarlo.xlsx"  # None = weź najnowszy plik MonteCarlo_*.xlsx
+    INPUT_FILE = r"N:\ksiz\STUDIA_DOKTORANCKIE\PRZEPIORKA\Modele sieci\Wysokie napiecie\PYTHON\Podsumowanie\Wył 70.71\Korelacja\MonteCarlo.xlsx"  # None = weź najnowszy plik MonteCarlo_*.xlsx
     
     # Próg korelacji (tylko powyżej tego progu będzie wyświetlane w raportach)
-    CORRELATION_THRESHOLD = 0.3  # |r| > 0.3
+    CORRELATION_THRESHOLD = 0.1  # |r| > 0.1
     
     # Poziom istotności statystycznej
     P_VALUE_THRESHOLD = 0.05  # p < 0.05
@@ -125,7 +125,8 @@ def calculate_correlations_full(df, set_value_cols, overload_cols):
     print("📊 OBLICZANIE PEŁNEJ MACIERZY KORELACJI")
     print("="*80)
     
-    correlations = {}  # Dla raportów (tylko istotne)
+    correlations = {}  # Dla raportów (tylko istotne >= 0.3)
+    weak_correlations = {}  # ✅ NOWE - słabe korelacje (0.1-0.3)
     full_matrix_r = {}  # Pełna macierz współczynników r
     full_matrix_p = {}  # Pełna macierz p-values
     full_matrix_n = {}  # Pełna macierz liczby próbek
@@ -138,7 +139,8 @@ def calculate_correlations_full(df, set_value_cols, overload_cols):
     
     for overload_col in overload_cols:
         line_name = overload_col.replace('OverloadedLine_', '').replace('_loading_pct', '')
-        line_correlations = []  # Tylko istotne dla raportów
+        line_correlations = []  # Tylko istotne >= 0.3 dla raportów
+        line_weak_correlations = []  # ✅ NOWE - słabe korelacje
         
         full_matrix_r[line_name] = {}
         full_matrix_p[line_name] = {}
@@ -172,9 +174,21 @@ def calculate_correlations_full(df, set_value_cols, overload_cols):
                         r_value, p_value = pearsonr(x_clean, y_clean)
                         n_samples = mask.sum()
                         
-                        # Zapisz tylko istotne do raportów
-                        if abs(r_value) >= CONFIG.CORRELATION_THRESHOLD and p_value <= CONFIG.P_VALUE_THRESHOLD:
+                        abs_r = abs(r_value)
+                        
+                        # Zapisz istotne (>= 0.3) do głównych raportów
+                        if abs_r >= CONFIG.CORRELATION_THRESHOLD and p_value <= CONFIG.P_VALUE_THRESHOLD:
                             line_correlations.append({
+                                'Element': element_name,
+                                'Element_Full': set_col,
+                                'Correlation_R': r_value,
+                                'P_Value': p_value,
+                                'N_Samples': n_samples
+                            })
+                        
+                        # ✅ NOWE - Zapisz słabe (0.1-0.3) jeśli są istotne
+                        elif 0.1 <= abs_r < 0.3 and p_value <= CONFIG.P_VALUE_THRESHOLD:
+                            line_weak_correlations.append({
                                 'Element': element_name,
                                 'Element_Full': set_col,
                                 'Correlation_R': r_value,
@@ -199,12 +213,19 @@ def calculate_correlations_full(df, set_value_cols, overload_cols):
         if line_correlations:
             line_correlations.sort(key=lambda x: abs(x['Correlation_R']), reverse=True)
             correlations[line_name] = line_correlations
+        
+        # ✅ NOWE - Sortuj słabe korelacje
+        if line_weak_correlations:
+            line_weak_correlations.sort(key=lambda x: abs(x['Correlation_R']), reverse=True)
+            weak_correlations[line_name] = line_weak_correlations
     
     print(f"  Postęp: 100%   ")
     print(f"✓ Obliczono {total_calculations:,} korelacji")
-    print(f"✓ Istotne korelacje dla {len(correlations)} linii")
+    print(f"✓ Istotne korelacje (|r| >= 0.3): {len(correlations)} linii")
+    print(f"✓ Słabe korelacje (0.1 <= |r| < 0.3): {len(weak_correlations)} linii")
     
-    return correlations, full_matrix_r, full_matrix_p, full_matrix_n
+    return correlations, weak_correlations, full_matrix_r, full_matrix_p, full_matrix_n
+
 
 def classify_correlation_strength(abs_r):
     """Klasyfikuj siłę korelacji"""
@@ -251,7 +272,7 @@ def create_correlation_report(correlations):
     if len(correlations) > 5:
         print(f"\n... i {len(correlations) - 5} więcej linii (szczegóły w pliku Excel)")
 
-def save_correlations_to_excel(correlations, full_matrix_r, full_matrix_p, full_matrix_n, input_file):
+def save_correlations_to_excel(correlations, weak_correlations, full_matrix_r, full_matrix_p, full_matrix_n, input_file):
     """Zapisz korelacje do Excela"""
     print("\n" + "="*80)
     print("💾 ZAPISYWANIE DO EXCELA")
@@ -266,7 +287,7 @@ def save_correlations_to_excel(correlations, full_matrix_r, full_matrix_p, full_
         # ARKUSZ 1: PEŁNA MACIERZ - WSPÓŁCZYNNIKI R
         # ========================================
         print("  📊 Tworzenie pełnej macierzy współczynników r...")
-        df_full_r = pd.DataFrame(full_matrix_r).T  # Transpozycja: linie = wiersze, elementy = kolumny
+        df_full_r = pd.DataFrame(full_matrix_r).T
         df_full_r.index.name = 'Line \\ Element'
         df_full_r.to_excel(writer, sheet_name='Full_Matrix_R')
         print(f"  ✓ Arkusz 'Full_Matrix_R': {df_full_r.shape[0]} linii × {df_full_r.shape[1]} elementów")
@@ -290,16 +311,60 @@ def save_correlations_to_excel(correlations, full_matrix_r, full_matrix_p, full_
         print(f"  ✓ Arkusz 'Full_Matrix_N': {df_full_n.shape[0]} linii × {df_full_n.shape[1]} elementów")
         
         # ========================================
-        # ARKUSZ 4: PODSUMOWANIE (tylko istotne)
+        # ✅ NOWY ARKUSZ: SŁABE KORELACJE (0.1-0.3)
+        # ========================================
+        if weak_correlations:
+            print("\n  📊 Tworzenie arkusza słabych korelacji...")
+            weak_corrs_data = []
+            for line_name, line_corrs in weak_correlations.items():
+                for corr in line_corrs:
+                    abs_r = abs(corr['Correlation_R'])
+                    weak_corrs_data.append({
+                        'Line_Name': line_name,
+                        'Element': corr['Element'],
+                        'Element_Full_Name': corr['Element_Full'],
+                        'Correlation_R': corr['Correlation_R'],
+                        'Abs_Correlation_R': abs_r,
+                        'Strength': classify_correlation_strength(abs_r),
+                        'P_Value': corr['P_Value'],
+                        'N_Samples': corr['N_Samples'],
+                        'Direction': 'Positive' if corr['Correlation_R'] > 0 else 'Negative',
+                    })
+            
+            if weak_corrs_data:
+                df_weak = pd.DataFrame(weak_corrs_data)
+                df_weak = df_weak.sort_values(['Line_Name', 'Abs_Correlation_R'], ascending=[True, False])
+                df_weak.to_excel(writer, sheet_name='Weak_Correlations', index=False)
+                print(f"  ✓ Arkusz 'Weak_Correlations': {len(df_weak)} korelacji (0.1 <= |r| < 0.3)")
+                
+                # Dodatkowy podział na dodatnie i ujemne
+                df_weak_positive = df_weak[df_weak['Correlation_R'] > 0]
+                df_weak_negative = df_weak[df_weak['Correlation_R'] < 0]
+                
+                if not df_weak_positive.empty:
+                    df_weak_positive.to_excel(writer, sheet_name='Weak_Positive', index=False)
+                    print(f"  ✓ Arkusz 'Weak_Positive': {len(df_weak_positive)} korelacji (0.1 <= r < 0.3)")
+                
+                if not df_weak_negative.empty:
+                    df_weak_negative.to_excel(writer, sheet_name='Weak_Negative', index=False)
+                    print(f"  ✓ Arkusz 'Weak_Negative': {len(df_weak_negative)} korelacji (-0.3 < r <= -0.1)")
+        
+        # ========================================
+        # ARKUSZ 4: PODSUMOWANIE (tylko istotne >= 0.3)
         # ========================================
         if correlations:
             summary_data = []
             for line_name, line_corrs in correlations.items():
                 if line_corrs:
                     max_corr = max(line_corrs, key=lambda x: abs(x['Correlation_R']))
+                    
+                    # ✅ Dodaj info o słabych korelacjach
+                    num_weak = len(weak_correlations.get(line_name, []))
+                    
                     summary_data.append({
                         'Line_Name': line_name,
                         'Num_Significant_Correlations': len(line_corrs),
+                        'Num_Weak_Correlations': num_weak,  # ✅ NOWE
                         'Max_Abs_Correlation': abs(max_corr['Correlation_R']),
                         'Max_Corr_Element': max_corr['Element'],
                         'Max_Corr_R': max_corr['Correlation_R'],
@@ -309,10 +374,10 @@ def save_correlations_to_excel(correlations, full_matrix_r, full_matrix_p, full_
             df_summary = pd.DataFrame(summary_data)
             df_summary = df_summary.sort_values('Max_Abs_Correlation', ascending=False)
             df_summary.to_excel(writer, sheet_name='Summary', index=False)
-            print(f"  ✓ Arkusz 'Summary': {len(df_summary)} linii")
+            print(f"\n  ✓ Arkusz 'Summary': {len(df_summary)} linii")
         
         # ========================================
-        # ARKUSZ 5: Wszystkie korelacje (długi format, tylko istotne)
+        # ARKUSZ 5: Wszystkie korelacje (długi format, tylko >= 0.3)
         # ========================================
         if correlations:
             all_corrs_data = []
@@ -334,7 +399,10 @@ def save_correlations_to_excel(correlations, full_matrix_r, full_matrix_p, full_
             df_all = pd.DataFrame(all_corrs_data)
             df_all = df_all.sort_values(['Line_Name', 'Abs_Correlation_R'], ascending=[True, False])
             df_all.to_excel(writer, sheet_name='All_Correlations', index=False)
-            print(f"  ✓ Arkusz 'All_Correlations': {len(df_all)} korelacji (istotne)")
+            print(f"  ✓ Arkusz 'All_Correlations': {len(df_all)} korelacji (|r| >= 0.3)")
+        
+        # [pozostała część bez zmian: arkusze dla top 10 linii, Top_Matrix, klasyfikacja wg siły]
+        # ... (linie 339-408 bez zmian)
         
         # ========================================
         # ARKUSZ 6+: Osobne arkusze dla top 10 linii
@@ -530,14 +598,14 @@ def main():
             return
         
         # OBLICZ PEŁNĄ MACIERZ
-        correlations, full_matrix_r, full_matrix_p, full_matrix_n = calculate_correlations_full(
+        correlations, weak_correlations, full_matrix_r, full_matrix_p, full_matrix_n = calculate_correlations_full(
             df, set_value_cols, overload_cols
         )
         
         create_correlation_report(correlations)
         
         output_file = save_correlations_to_excel(
-            correlations, full_matrix_r, full_matrix_p, full_matrix_n, input_file
+            correlations, weak_correlations, full_matrix_r, full_matrix_p, full_matrix_n, input_file
         )
         
         if output_file:

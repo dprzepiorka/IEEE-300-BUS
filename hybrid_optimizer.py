@@ -1,9 +1,10 @@
 """
-Hybrydowa optymalizacja:Generatory + Rekonfiguracja topologii (PSO + ranking linii)
+Hybrydowa optymalizacja: Generatory + Rekonfiguracja topologii (PSO/PO + ranking linii)
 - Wczytywanie danych bazowych z Excel
 - Złagodzona weryfikacja Load Flow (≥70% linii z danymi)
 - Early stopping (threshold + patience)
 - Pełny eksport ustawień + obciążenia linii
+- WYBÓR ALGORYTMU: PSO lub PO (Puma Optimizer)
 """
 
 import sys
@@ -29,7 +30,9 @@ try:
         OUT_DIR, EXCEL_FILE, PROJECT_NAME, USER
     )
     from PSO import PSO
-    print("✅ Moduły zaimportowane")
+    from PO import PO
+    from GBO import GBO  
+    print("✅ Moduły zaimportowane (PSO + PO + GBO)")
 except ImportError as e:
     print(f"❌ Błąd importu:{e}")
     raise
@@ -40,26 +43,129 @@ HYBRID_OUT_DIR.mkdir(exist_ok=True)
 
 @dataclass
 class HybridConfig:
-    n_particles:int = 1000
-    max_iter:int = 500    # Domyslnie ok 5000
-    w:float = 0.7
-    c1:float = 1.5
-    c2:float = 1.5
-    autosave_every:int = 10
-    early_stop_threshold:float = 0.0
-    early_stop_patience:int = 1000
-    weight_topology:float = 0.0
-    weight_overload:float = 1.0
-    observed_lines:List[str] = None
-    min_valid_lines_pct:float = 0.7  # 70%
+    # ✅ Wybór algorytmu
+    optimizer_type: str = "GBO"  # "PSO", "PO", lub "GBO"
+    
+    # ✅ NOWY - Tryb optymalizacji
+    optimization_mode: str = "hybrid"  # "generators_only", "topology_only", "hybrid"
+    
+    # ✅ Tryb określania liczby agentów
+    n_particles_mode: str = "auto"  # "fixed" lub "auto"
+    n_particles_fixed: int = 100    # Używane gdy mode="fixed"
+    
+    # ✅ Parametry auto-skalowania
+    particles_per_dim: float = 1.0  # Współczynnik: n_particles = particles_per_dim * dim
+    particles_min: int = 5          # Minimalna liczba agentów
+    particles_max: int = 500        # Maksymalna liczba agentów
+    
+    # Parametry dla PSO
+    w: float = 0.7
+    c1: float = 1.5
+    c2: float = 1.5
+    
+    # Parametry dla PO
+    # (używa n_particles_fixed jako n_solutions w trybie fixed)
+    
+    # Parametry dla GBO
+    pr: float = 0.5  # Probability of using GSR vs LEO
+    
+    # Wspólne parametry
+    max_iter: int = 500
+    autosave_every: int = 10
+    early_stop_threshold: float = 0.0
+    early_stop_patience: int = 1000
+    weight_topology: float = 0.0
+    weight_overload: float = 1.0
+    observed_lines: List[str] = None
+    min_valid_lines_pct: float = 0.7
     
     def __post_init__(self):
+        # Walidacja wyboru algorytmu
+        if self.optimizer_type not in ["PSO", "PO", "GBO"]:
+            raise ValueError(f"optimizer_type musi być 'PSO', 'PO' lub 'GBO', otrzymano: {self.optimizer_type}")
+        
+        # ✅ NOWE - Walidacja trybu optymalizacji
+        if self.optimization_mode not in ["generators_only", "topology_only", "hybrid"]:
+            raise ValueError(f"optimization_mode musi być 'generators_only', 'topology_only' lub 'hybrid', otrzymano: {self.optimization_mode}")
+        
+        # ✅ Walidacja trybu liczby agentów
+        if self.n_particles_mode not in ["fixed", "auto"]:
+            raise ValueError(f"n_particles_mode musi być 'fixed' lub 'auto', otrzymano: {self.n_particles_mode}")
+        
         if self.observed_lines is None:
-            # self.observed_lines = ['5.73', '8.14', '73.71', '175.173', '173.172', '35.77', '5.9']
-            # self.observed_lines = ['5.73', '1.73', '73.71', '79.73', '5.9']
             self.observed_lines = ['1.73', '10.13', '100.102', '102.104', '102.33', '102.98', '103.105', '104.108', '105.107', '105.11', '107.99', '109.11', '109.113', '109.99', '11.1', '11.8', '11.9', '110.9001', '112.11', '113.47', '114.109', '114.112', '13.11', '13.2', '131.7', '14.15', '1411.371', '1411.81', '144.62', '15.17', '15.37', '15.9', '150.3', '16.4', '17.18', '18.10', '18.201', '19.21', '19.3', '19.87', '194.81', '20.22', '20.27', '20.531', '204.201', '206.207', '207.114', '21.24', '211.79', '211.8', '22.23', '23.528', '24.319', '24.36', '25.23', '26.25', '26.32', '27.26', '33.41', '34.42', '35.72', '35.76', '35.77', '35.99', '36.88', '37.38', '37.63', '37.9001', '371.42', '38.33', '38.37', '39.42', '40.33', '40.37', '41.38', '41.49', '41.91', '42.16', '42.46', '43.38', '43.48', '44.43', '44.54', '45.74', '47.32', '47.44', '47.73', '47.9', '48.107', '48.4', '49.37', '49.51', '5.1', '5.73', '5.9', '51.41', '52.51', '52.55', '526.63', '528.7', '528.77', '53.43', '53.54', '55.54', '57.55', '57.58', '59.58', '6.2', '60.45', '61.59', '61.69', '61.94', '62.6', '63.57', '63.89', '69.15', '69.201', '69.211', '69.63', '69.79', '7.3', '70.71', '71.72', '72.112', '72.531', '73.71', '73.76', '76.77', '76.9001', '77.552', '77.609', '77.72', '77.78', '77.8', '771.195', '771.371', '78.84', '79.73', '79.78', '8.14', '8.2', '81.195', '81.46', '81.771', '86.323', '87.86', '88.74', '89.15', '89.91', '90.37', '9001.552', '91.94', '92.103', '92.105', '92.9', '94.1', '97.102', '97.103', '97.91', '98.1', '99.108', '99.11']
+    
+    def calculate_n_particles(self, dim: int) -> int:
+        """
+        Oblicz liczbę agentów w zależności od trybu
+        
+        Args:
+            dim: liczba wymiarów (zmiennych) problemu
+            
+        Returns:
+            liczba agentów do użycia
+        """
+        if self.n_particles_mode == "fixed":
+            n = self.n_particles_fixed
+            print(f"  📊 Tryb: FIXED - używam stałej liczby agentów: {n}")
+            return n
+        
+        elif self.n_particles_mode == "auto":
+            # Skalowanie: n = particles_per_dim * dim
+            n_auto = int(self.particles_per_dim * dim)
+            
+            # Ograniczenia min/max
+            n = max(self.particles_min, min(n_auto, self.particles_max))
+            
+            print(f"  📊 Tryb: AUTO - skalowanie z liczbą zmiennych:")
+            print(f"     Wymiary: {dim}")
+            print(f"     Wzór: {self.particles_per_dim} × {dim} = {n_auto}")
+            print(f"     Ograniczenia: [{self.particles_min}, {self.particles_max}]")
+            print(f"     ✅ Używam: {n} agentów")
+            
+            
+            return n  # ✅ BRAKOWAŁO TEGO!
+        
+        else:
+            raise ValueError(f"Nieznany tryb: {self.n_particles_mode}")
 
 CONFIG = HybridConfig()
+
+# === KONTROLA ZATRZYMANIA ===
+def check_stop_signal(control_file: Path) -> bool:
+    """
+    Sprawdź czy użytkownik chce zatrzymać optymalizację
+    
+    Returns:
+        True - zatrzymaj optymalizację
+        False - kontynuuj
+    """
+    try:
+        if not control_file.exists():
+            return True  # Plik usunięty = stop
+        
+        with open(control_file, 'r') as f:
+            content = f.read().strip()
+        
+        # Sprawdź czy wartość to 0 lub "stop"
+        if content in ['0', 'stop', 'STOP', 'Stop']:
+            return True
+        
+        return False
+    except Exception:
+        return False  # Błąd odczytu = kontynuuj (bezpieczniejsze)
+
+def create_control_file(control_file: Path) -> bool:
+    """Utwórz plik kontrolny z wartością 1"""
+    try:
+        with open(control_file, 'w') as f:
+            f.write("1")
+        print(f"✅ Plik kontrolny utworzony: {control_file}")
+        print(f"   Aby zatrzymać optymalizację, wpisz '0' lub 'stop' do tego pliku")
+        return True
+    except Exception as e:
+        print(f"⚠️ Nie można utworzyć pliku kontrolnego: {e}")
+        return False
 
 # === LOGOWANIE ===
 def safe_log(msg:str, logger:Optional[Logger] = None, app=None):
@@ -324,15 +430,25 @@ class HybridObjective:
         self.best_value = np.inf
         self.best_x = None
         
-        # Wymiary
+        # ✅ NOWE - Kontrola zatrzymania
+        self.control_file = None
+        self.check_stop_every = 1  # Sprawdzaj co 1 ewaluację
+        self.stop_requested = False
+        
+        # Wymiary - zależne od trybu optymalizacji
         self.n_gen_vars = sum(
             1 for v in opt_variables for attr in ['Attribute_P', 'Attribute_Q'] if v.get(attr)
-        )
-        self.n_line_vars = 1 + len(candidate_lines)
+        ) if config.optimization_mode in ["generators_only", "hybrid"] else 0
+        
+        self.n_line_vars = (1 + len(candidate_lines)) if config.optimization_mode in ["topology_only", "hybrid"] else 0
+        
         self.total_dim = self.n_gen_vars + self.n_line_vars
         
-        print(f"  Gen vars:{self.n_gen_vars}")
-        print(f"  Line vars:{self.n_line_vars} (1 liczba + {len(candidate_lines)} ranking)")
+        print(f"  🎯 Tryb optymalizacji: {config.optimization_mode}")
+        if config.optimization_mode in ["generators_only", "hybrid"]:
+            print(f"  Gen vars:{self.n_gen_vars}")
+        if config.optimization_mode in ["topology_only", "hybrid"]:
+            print(f"  Line vars:{self.n_line_vars} (1 liczba + {len(candidate_lines)} ranking)")
         print(f"  Total:{self.total_dim}")
         print(f"  Zakres wyłączeń:[{min_lines_out}, {max_lines_out}]")
         print(f"  Overload_base:{self.overload_base:.3f}")
@@ -356,23 +472,38 @@ class HybridObjective:
     
     def _decode_vector(self, x:np.ndarray) -> Tuple[np.ndarray, List[str]]:
         """Dekoduj wektor - WYMUSZENIE [Min, Max]"""
-        gen_values = x[:self.n_gen_vars]
-        n_to_disable_raw = x[self.n_gen_vars]
-        line_scores = x[self.n_gen_vars + 1:]
-        
-        n_range = self.max_lines_out - self.min_lines_out
-        n_to_disable = (self.min_lines_out + int(round(n_to_disable_raw * n_range))) if n_range > 0 else self.min_lines_out
-        n_to_disable = max(self.min_lines_out, min(n_to_disable, self.max_lines_out))
-        
         lines_to_disable = []
-        if n_to_disable > 0:
-            line_ranking = sorted(enumerate(line_scores[:len(self.candidate_lines)]), key=lambda x:x[1], reverse=True)
-            lines_to_disable = [self.candidate_lines[idx] for idx, _ in line_ranking[:n_to_disable]]
+        gen_values = np.array([])
+        
+        # ✅ Dekodowanie generatorów (jeśli aktywne)
+        if self.config.optimization_mode in ["generators_only", "hybrid"]:
+            gen_values = x[:self.n_gen_vars]
+            x_offset = self.n_gen_vars
+        else:
+            gen_values = np.array([])
+            x_offset = 0
+        
+        # ✅ Dekodowanie topologii (jeśli aktywne)
+        if self.config.optimization_mode in ["topology_only", "hybrid"]:
+            n_to_disable_raw = x[x_offset]
+            line_scores = x[x_offset + 1:]
+            
+            n_range = self.max_lines_out - self.min_lines_out
+            n_to_disable = (self.min_lines_out + int(round(n_to_disable_raw * n_range))) if n_range > 0 else self.min_lines_out
+            n_to_disable = max(self.min_lines_out, min(n_to_disable, self.max_lines_out))
+            
+            if n_to_disable > 0:
+                line_ranking = sorted(enumerate(line_scores[:len(self.candidate_lines)]), key=lambda x:x[1], reverse=True)
+                lines_to_disable = [self.candidate_lines[idx] for idx, _ in line_ranking[:n_to_disable]]
         
         return gen_values, lines_to_disable
     
     def _apply_generator_settings(self, gen_values:np.ndarray):
         """Ustaw generatory"""
+        # ✅ Skip jeśli tryb topology_only
+        if self.config.optimization_mode == "topology_only":
+            return
+        
         idx = 0
         for var in self.opt_variables:
             key = f"{var['Element_Name']}_{var['Element_Type']}"
@@ -388,6 +519,10 @@ class HybridObjective:
     
     def _apply_line_settings(self, lines_to_disable:List[str]):
         """Ustaw linie - WŁĄCZ WSZYSTKIE, potem wyłącz wybrane"""
+        # ✅ Skip jeśli tryb generators_only
+        if self.config.optimization_mode == "generators_only":
+            return
+        
         # Reset wszystkich linii
         try:
             all_lines = self.app.GetCalcRelevantObjects("*.ElmLne")
@@ -477,6 +612,17 @@ class HybridObjective:
         """Funkcja celu"""
         self.eval_count += 1
         
+        # ✅ NOWE - Sprawdź plik kontrolny
+        if self.control_file and self.eval_count % self.check_stop_every == 0:
+            if check_stop_signal(self.control_file):
+                self.stop_requested = True
+                print(f"\n🛑 STOP REQUESTED - wykryto sygnał zatrzymania w pliku: {self.control_file}")
+                print(f"   Ewaluacja #{self.eval_count}")
+                # Zwróć najlepsze dotychczas znalezione
+                if self.best_x is not None:
+                    return self.best_value
+                return np.inf
+        
         try:
             # Dekoduj + zastosuj
             gen_values, lines_to_disable = self._decode_vector(x)
@@ -494,10 +640,16 @@ class HybridObjective:
                 self.lf_fail_count += 1
                 return np.inf
             
-            # Funkcja celu
+            # Funkcja celu - wyłączenia + przeciążenia
+            #n_disabled = len(lines_to_disable)
+            #term1 = n_disabled / self.max_lines_out if self.max_lines_out > 0 else float(n_disabled)
+            #term2 = overload_current / self.overload_base
+            #f_total = self.config.weight_topology * term1 + self.config.weight_overload * term2
+            
+            # Funkcja celu - wyłączenia + przeciążenia
             n_disabled = len(lines_to_disable)
             term1 = n_disabled / self.max_lines_out if self.max_lines_out > 0 else float(n_disabled)
-            term2 = overload_current / self.overload_base
+            term2 = overload_current
             f_total = self.config.weight_topology * term1 + self.config.weight_overload * term2
             
             if np.isnan(f_total) or np.isinf(f_total):
@@ -523,12 +675,16 @@ def run_hybrid_optimization(app, ldf, excel_file:str, scenario_name="HYBRID"):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = HYBRID_OUT_DIR / f"hybrid_log_{timestamp}.txt"
     error_file = HYBRID_OUT_DIR / f"hybrid_ERROR_{timestamp}.txt"
+    control_file = HYBRID_OUT_DIR / f"CONTROL_{timestamp}.txt"  # ✅ NOWE
     
     try:
         logger = Logger(str(log_file), app)
     except Exception as e:
         error_file.write_text(f"LOGGER ERROR:{e}\n")
         return None
+    
+    # ✅ NOWE - Utwórz plik kontrolny
+    create_control_file(control_file)
     
     def log_msg(msg):
         safe_log(msg, logger, app)
@@ -584,58 +740,124 @@ def run_hybrid_optimization(app, ldf, excel_file:str, scenario_name="HYBRID"):
             app, ldf, opt_variables, candidate_lines, min_lines_out, max_lines_out, CONFIG, overload_base
         )
         
+        # ✅ NOWE - Podłącz plik kontrolny
+        objective.control_file = control_file
+        log_msg(f"  ✅ Plik kontrolny: {control_file.name}")
+        log_msg(f"     Sprawdzanie co {objective.check_stop_every} ewaluacji")
+        
         # [4/7] Granice
         log_msg("\n[4/7] Określanie granic zmiennych...")
+        log_msg(f"  🎯 Tryb optymalizacji: {CONFIG.optimization_mode}")
         lb, ub, var_names = [], [], []
         
-        for var in opt_variables:
-            for attr_min, attr_max, suffix in [('Pmin', 'Pmax', '_P'), ('Qmin', 'Qmax', '_Q')]:
-                if attr_min in var and attr_max in var:
-                    lb.append(float(var[attr_min]))
-                    ub.append(float(var[attr_max]))
-                    var_names.append(f"{var['Element_Name']}{suffix}")
+        # ✅ Generatory (jeśli aktywne)
+        if CONFIG.optimization_mode in ["generators_only", "hybrid"]:
+            for var in opt_variables:
+                for attr_min, attr_max, suffix in [('Pmin', 'Pmax', '_P'), ('Qmin', 'Qmax', '_Q')]:
+                    if attr_min in var and attr_max in var:
+                        lb.append(float(var[attr_min]))
+                        ub.append(float(var[attr_max]))
+                        var_names.append(f"{var['Element_Name']}{suffix}")
+            log_msg(f"  ✓ Zmienne generatorów: {len([v for v in var_names if '_P' in v or '_Q' in v])}")
         
-        lb.append(0.0)
-        ub.append(1.0)
-        var_names.append("N_lines_to_disable")
-        
-        for line_name in candidate_lines:
-            lb.extend([0.0])
-            ub.extend([1.0])
-            var_names.append(f"Score_{line_name}")
+        # ✅ Topologia (jeśli aktywna)
+        if CONFIG.optimization_mode in ["topology_only", "hybrid"]:
+            lb.append(0.0)
+            ub.append(1.0)
+            var_names.append("N_lines_to_disable")
+            
+            for line_name in candidate_lines:
+                lb.extend([0.0])
+                ub.extend([1.0])
+                var_names.append(f"Score_{line_name}")
+            log_msg(f"  ✓ Zmienne topologii: {1 + len(candidate_lines)}")
         
         lb, ub = np.array(lb), np.array(ub)
         
         log_msg(f"  ✓ Wymiar przestrzeni:{len(lb)}")
         
-        # [5/7] PSO
-        log_msg("\n[5/7] Uruchamianie PSO...")
-        log_msg(f"  Parametry:")
-        log_msg(f"    Cząstek:{CONFIG.n_particles}")
-        log_msg(f"    Max iteracji:{CONFIG.max_iter}")
-        log_msg(f"    🎯 Early stop threshold:f <= {CONFIG.early_stop_threshold}")
+        # ✅ NOWE - Oblicz liczbę agentów
+        log_msg(f"\n[4.5/7] Określanie liczby agentów...")
+        n_particles = CONFIG.calculate_n_particles(len(lb))
+        log_msg(f"  ✅ Liczba agentów: {n_particles}")
         
-        pso = PSO(
-            func=objective,
-            n_particles=CONFIG.n_particles,
-            dim=len(lb),
-            lb=lb,
-            ub=ub,
-            max_iter=CONFIG.max_iter,
-            w=CONFIG.w,
-            c1=CONFIG.c1,
-            c2=CONFIG.c2,
-            autosave_every_iters=CONFIG.autosave_every,
-            autosave_path=str(HYBRID_OUT_DIR / f"hybrid_checkpoint_{timestamp}.npz"),
-            early_stop_threshold=CONFIG.early_stop_threshold,
-            early_stop_patience=CONFIG.early_stop_patience
-        )
+        # [5/7] OPTIMIZER (PSO, PO lub GBO)
+        log_msg(f"\n[5/7] Uruchamianie {CONFIG.optimizer_type}...")
+        log_msg(f"  Parametry:")
+        
+        if CONFIG.optimizer_type == "PSO":
+            log_msg(f"    Cząstek: {n_particles}")  # ✅ Używamy obliczonej wartości
+            log_msg(f"    w={CONFIG.w}, c1={CONFIG.c1}, c2={CONFIG.c2}")
+        elif CONFIG.optimizer_type == "PO":
+            log_msg(f"    Rozwiązań: {n_particles}")  # ✅ Używamy obliczonej wartości
+            log_msg(f"    (PO używa adaptacyjnych faz Exploration/Exploitation)")
+        elif CONFIG.optimizer_type == "GBO":
+            log_msg(f"    Rozwiązań: {n_particles}")  # ✅ Używamy obliczonej wartości
+            log_msg(f"    Probability (pr): {CONFIG.pr}")
+            log_msg(f"    (GBO: Gradient Search Rule + Local Escaping Operator)")
+        
+        log_msg(f"    Max iteracji: {CONFIG.max_iter}")
+        log_msg(f"    🎯 Early stop threshold: f <= {CONFIG.early_stop_threshold}")
+        log_msg(f"    ⏸️  Early stop patience: {CONFIG.early_stop_patience}")
+        
+        # ✅ Wybór algorytmu (używamy n_particles zamiast CONFIG.n_particles_fixed)
+        if CONFIG.optimizer_type == "PSO":
+            optimizer = PSO(
+                func=objective,
+                n_particles=n_particles,  # ✅ Dynamiczna wartość
+                dim=len(lb),
+                lb=lb,
+                ub=ub,
+                max_iter=CONFIG.max_iter,
+                w=CONFIG.w,
+                c1=CONFIG.c1,
+                c2=CONFIG.c2,
+                autosave_every_iters=CONFIG.autosave_every,
+                autosave_path=str(HYBRID_OUT_DIR / f"hybrid_pso_checkpoint_{timestamp}.npz"),
+                early_stop_threshold=CONFIG.early_stop_threshold,
+                early_stop_patience=CONFIG.early_stop_patience
+            )
+        elif CONFIG.optimizer_type == "PO":
+            optimizer = PO(
+                func=objective,
+                n_solutions=n_particles,  # ✅ Dynamiczna wartość
+                dim=len(lb),
+                lb=lb,
+                ub=ub,
+                max_iter=CONFIG.max_iter,
+                autosave_every_iters=CONFIG.autosave_every,
+                autosave_path=str(HYBRID_OUT_DIR / f"hybrid_po_checkpoint_{timestamp}.npz"),
+                early_stop_threshold=CONFIG.early_stop_threshold,
+                early_stop_patience=CONFIG.early_stop_patience
+            )
+        elif CONFIG.optimizer_type == "GBO":
+            optimizer = GBO(
+                func=objective,
+                n_solutions=n_particles,  # ✅ Dynamiczna wartość
+                dim=len(lb),
+                lb=lb,
+                ub=ub,
+                max_iter=CONFIG.max_iter,
+                pr=CONFIG.pr,
+                autosave_every_iters=CONFIG.autosave_every,
+                autosave_path=str(HYBRID_OUT_DIR / f"hybrid_gbo_checkpoint_{timestamp}.npz"),
+                early_stop_threshold=CONFIG.early_stop_threshold,
+                early_stop_patience=CONFIG.early_stop_patience
+            )
+        else:
+            raise ValueError(f"Nieznany optimizer_type: {CONFIG.optimizer_type}")
         
         time_start = time.time()
-        result = pso.optimize()
+        result = optimizer.optimize()
         time_end = time.time()
         
-        log_msg(f"\n✅ Optymalizacja zakończona:{time_end - time_start:.2f}s")
+        # ✅ NOWE - Sprawdź czy zatrzymano przez użytkownika
+        if objective.stop_requested:
+            log_msg(f"\n🛑 OPTYMALIZACJA ZATRZYMANA PRZEZ UŻYTKOWNIKA")
+            log_msg(f"   Czas do zatrzymania: {time.time() - time_start:.2f}s")
+            log_msg(f"   Ewaluacji wykonanych: {objective.eval_count}")
+        else:
+            log_msg(f"\n✅ Optymalizacja zakończona: {time_end - time_start:.2f}s")
         
         # Statystyki odrzuceń
         log_msg(f"\n📊 STATYSTYKI ODRZUCEŃ:")
@@ -657,16 +879,25 @@ def run_hybrid_optimization(app, ldf, excel_file:str, scenario_name="HYBRID"):
         # [6/7] Zastosowanie najlepszego rozwiązania
         log_msg("\n[6/7] Zastosowanie najlepszego rozwiązania...")
         gen_best, lines_best = objective._decode_vector(result['gbest'])
-        objective._apply_generator_settings(gen_best)
-        objective._apply_line_settings(lines_best)
+        
+        if CONFIG.optimization_mode in ["generators_only", "hybrid"]:
+            objective._apply_generator_settings(gen_best)
+            log_msg(f"  ✓ Zastosowano ustawienia generatorów")
+        
+        if CONFIG.optimization_mode in ["topology_only", "hybrid"]:
+            objective._apply_line_settings(lines_best)
+            log_msg(f"  ✓ Zastosowano konfigurację linii ({len(lines_best)} wyłączonych)")
         
         stats_after = get_observed_lines_stats(app, ldf, CONFIG.observed_lines)
         settings_after = export_all_settings(app, ldf, "AFTER")
         
         log_msg(f"\n📊 PORÓWNANIE:")
-        log_msg(f"  Przed:{stats_before['total_overload']:.3f} ({stats_before['overloaded_count']} linii)")
-        log_msg(f"  Po:{stats_after['total_overload']:.3f} ({stats_after['overloaded_count']} linii)")
-        log_msg(f"  Wyłączonych linii:{len(lines_best)}")
+        log_msg(f"  Tryb optymalizacji: {CONFIG.optimization_mode}")
+        log_msg(f"  Przeciążenia przed: {stats_before['total_overload']:.3f} ({stats_before['overloaded_count']} linii)")
+        log_msg(f"  Przeciążenia po: {stats_after['total_overload']:.3f} ({stats_after['overloaded_count']} linii)")
+        
+        if CONFIG.optimization_mode in ["topology_only", "hybrid"]:
+            log_msg(f"  Wyłączonych linii: {len(lines_best)}")
         
         if stats_before['total_overload'] > 0:
             change = stats_after['total_overload'] - stats_before['total_overload']
@@ -680,23 +911,29 @@ def run_hybrid_optimization(app, ldf, excel_file:str, scenario_name="HYBRID"):
         
         # [7/7] Excel
         log_msg("\n[7/7] Zapisywanie wyników do Excel...")
-        output_file = HYBRID_OUT_DIR / f"HYBRID_{scenario_name}_{timestamp}.xlsx"
+        output_file = HYBRID_OUT_DIR / f"HYBRID_{CONFIG.optimizer_type}_{scenario_name}_{timestamp}.xlsx"
         
         with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
             # Podsumowanie
             early_stop_info = "Wszystkie iteracje"
-            if result.get('early_stopped'):
+            if objective.stop_requested:
+                early_stop_info = "Zatrzymane przez użytkownika"
+            elif result.get('early_stopped'):
                 reason = result.get('reason')
                 early_stop_info = "Cel osiągnięty" if reason == 'threshold_reached' else "Brak poprawy"
             
             summary = {
                 'Parametr':[
-                    'Scenariusz', 'Timestamp', 'Czas [s]', 'Status', 'Iteracji wykonanych', '',
+                    'Algorytm', 'Tryb optymalizacji', 'Tryb agentów', 'Liczba agentów', 'Scenariusz', 'Timestamp', 'Czas [s]', 'Status', 'Iteracji wykonanych', '',
                     'Ewaluacji total', 'Wyspy', 'LF fails', 'Akceptowanych', 'Acceptance rate', '',
                     'Przeciążenia przed', 'Przeciążenia po', 'Redukcja', '',
                     'Linii wyłączonych', 'Zakres dozwolony', '', 'f_celu',
                 ],
                 'Wartość':[
+                    CONFIG.optimizer_type,
+                    CONFIG.optimization_mode,  # ✅ NOWE
+                    CONFIG.n_particles_mode,
+                    n_particles,
                     scenario_name, timestamp, f"{time_end - time_start:.2f}", early_stop_info,
                     f"{result.get('stopped_at_iter', CONFIG.max_iter)}/{CONFIG.max_iter}", '',
                     objective.eval_count,
@@ -733,52 +970,76 @@ def run_hybrid_optimization(app, ldf, excel_file:str, scenario_name="HYBRID"):
                         pd.DataFrame(settings[key]).to_excel(writer, sheet_name=f'{phase}_{sheet_suffix}', index=False)
             
             # Zmiany optymalizowanych elementów
-            gen_changes = []
-            idx = 0
-            for var in opt_variables:
-                row = {'Element':var['Element_Name'], 'Type':var['Element_Type']}
-                for attr, suffix in [('Attribute_P', 'P_AFTER [MW]'), ('Attribute_Q', 'Q_AFTER [Mvar]')]:
-                    if var.get(attr):
-                        row[suffix] = f"{gen_best[idx]:.6f}"
-                        idx += 1
-                gen_changes.append(row)
-            pd.DataFrame(gen_changes).to_excel(writer, sheet_name='Optimized_Generators', index=False)
+            if CONFIG.optimization_mode in ["generators_only", "hybrid"]:
+                gen_changes = []
+                idx = 0
+                for var in opt_variables:
+                    row = {'Element':var['Element_Name'], 'Type':var['Element_Type']}
+                    for attr, suffix in [('Attribute_P', 'P_AFTER [MW]'), ('Attribute_Q', 'Q_AFTER [Mvar]')]:
+                        if var.get(attr):
+                            row[suffix] = f"{gen_best[idx]:.6f}"
+                            idx += 1
+                    gen_changes.append(row)
+                if gen_changes:
+                    pd.DataFrame(gen_changes).to_excel(writer, sheet_name='Optimized_Generators', index=False)
             
             # Linie - status
-            lines_status = [
-                {'Line':line_name, 'Status_AFTER':'DISABLED' if line_name in lines_best else 'ACTIVE'}
-                for line_name in candidate_lines
-            ]
-            pd.DataFrame(lines_status).to_excel(writer, sheet_name='Optimized_Lines', index=False)
+            if CONFIG.optimization_mode in ["topology_only", "hybrid"]:
+                lines_status = [
+                    {'Line':line_name, 'Status_AFTER':'DISABLED' if line_name in lines_best else 'ACTIVE'}
+                    for line_name in candidate_lines
+                ]
+                if lines_status:
+                    pd.DataFrame(lines_status).to_excel(writer, sheet_name='Optimized_Lines', index=False)
             
             # Porównanie
+            comparison_metrics = ['Suma przeciążeń', 'Linii przeciążonych', 'Max przeciążenie']
+            comparison_before = [
+                f"{stats_before['total_overload']:.3f}",
+                stats_before['overloaded_count'],
+                f"{stats_before['max_overload']:.2f}%",
+            ]
+            comparison_after = [
+                f"{stats_after['total_overload']:.3f}",
+                stats_after['overloaded_count'],
+                f"{stats_after['max_overload']:.2f}%",
+            ]
+            comparison_change = [
+                f"{(stats_after['total_overload'] - stats_before['total_overload']) / max(stats_before['total_overload'], 0.1) * 100:.2f}%",
+                f"{stats_after['overloaded_count'] - stats_before['overloaded_count']:+d}",
+                'N/A',
+            ]
+            
+            # Dodaj metrykę linii tylko jeśli optymalizujemy topologię
+            if CONFIG.optimization_mode in ["topology_only", "hybrid"]:
+                comparison_metrics.append('Linii wyłączonych')
+                comparison_before.append(0)
+                comparison_after.append(len(lines_best))
+                comparison_change.append(f"+{len(lines_best)}")
+            
             comparison = {
-                'Metryka':['Suma przeciążeń', 'Linii przeciążonych', 'Max przeciążenie', 'Linii wyłączonych'],
-                'Przed':[
-                    f"{stats_before['total_overload']:.3f}",
-                    stats_before['overloaded_count'],
-                    f"{stats_before['max_overload']:.2f}%",
-                    0,
-                ],
-                'Po':[
-                    f"{stats_after['total_overload']:.3f}",
-                    stats_after['overloaded_count'],
-                    f"{stats_after['max_overload']:.2f}%",
-                    len(lines_best),
-                ],
-                'Zmiana':[
-                    f"{(stats_after['total_overload'] - stats_before['total_overload']) / max(stats_before['total_overload'], 0.1) * 100:.2f}%",
-                    f"{stats_after['overloaded_count'] - stats_before['overloaded_count']:+d}",
-                    'N/A',
-                    f"+{len(lines_best)}",
-                ]
+                'Metryka': comparison_metrics,
+                'Przed': comparison_before,
+                'Po': comparison_after,
+                'Zmiana': comparison_change,
             }
             pd.DataFrame(comparison).to_excel(writer, sheet_name='Comparison', index=False)
         
         log_msg(f"\n✅ Wyniki zapisane:{output_file}")
         log_msg("\n" + "="*80)
-        log_msg("✅ OPTYMALIZACJA ZAKOŃCZONA POMYŚLNIE")
+        if objective.stop_requested:
+            log_msg("🛑 OPTYMALIZACJA ZATRZYMANA PRZEZ UŻYTKOWNIKA")
+        else:
+            log_msg("✅ OPTYMALIZACJA ZAKOŃCZONA POMYŚLNIE")
         log_msg("="*80)
+        
+        # ✅ NOWE - Usuń plik kontrolny
+        try:
+            if control_file.exists():
+                control_file.unlink()
+                log_msg(f"  🗑️ Usunięto plik kontrolny")
+        except:
+            pass
         
         return result
     except Exception as e:
